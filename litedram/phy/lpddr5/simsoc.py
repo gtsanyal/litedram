@@ -314,9 +314,10 @@ def generate_gtkw_savefile(builder, vns, trace_fst):
 
 def main():
     parser = argparse.ArgumentParser(description="Generic LiteX SoC Simulation")
-    builder_args(parser.add_argument_group(title="Builder"))
-    soc_core_args(parser.add_argument_group(title="SoC Core"))
-    group = parser.add_argument_group(title="LPDDR4 simulation")
+    #builder_args(parser.add_argument_group(title="Builder"))
+    builder_args(parser)
+    soc_core_args(parser)
+    group = parser.add_argument_group(title="LPDDR5 simulation")
     group.add_argument("--sdram-verbosity",      default=0,               help="Set SDRAM checker verbosity")
     group.add_argument("--trace",                action="store_true",     help="Enable Tracing")
     group.add_argument("--trace-fst",            action="store_true",     help="Enable FST tracing (default=VCD)")
