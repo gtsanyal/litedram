@@ -1,5 +1,7 @@
 `timescale 1ns/1ps
 
+
+
 module tb_lpddr5_controller ();
 
 /////////////////////////////////
@@ -8,11 +10,19 @@ module tb_lpddr5_controller ();
     localparam BANKS = 16;
 
 /////////////////////////////////
-// Clock and Reset
+// Clock, Reset, Signal Monitoring 
 /////////////////////////////////
 
-    logic sys_clk   = 1'b0;
+    logic sys_clk   = 1'b1;
     always #5 sys_clk = ~sys_clk; // 100Mhz
+
+    initial begin
+        $timeformat(-9, 1, " ns", 10);
+    end
+    initial begin
+        monitor_dfi();
+    end
+
     logic sys_rst = 1'b1;
 
 /////////////////////////////////
@@ -88,12 +98,39 @@ module tb_lpddr5_controller ();
 /////////////////////////////////
 
     initial begin
+
         set_init();
+        
         repeat(10) @(posedge sys_clk);
         @(negedge sys_clk);
         sys_rst = 1'b0;
-        
+        repeat (5) @(posedge sys_clk);
+
+        $display("READ BEGIN-------------------------------------------------");
+        fork
+            send_read(25'h0001234);
+            wait_for_read();
+        join
+        $display("READ END---------------------------------------------------");
+
+        repeat(10) @(posedge sys_clk);
+
+        $display("WRITE BEGIN------------------------------------------------");
+        fork
+            send_write(
+                25'h0001234,
+                256'h0123456789ABCDEF_0123456789ABCDEF_0123456789ABCDEF_0123456789ABCDEF
+            );
+            // @ same time bc send_write might write before wait_for_write starts
+            // Since send_write also forks
+            wait_for_write();
+        join
+        $display("WRITE END--------------------------------------------------");
+
+
+        $display("----------------------------------------------");
         $display("lb_lpddr5_controller.sv finished successfully");
+        $display("----------------------------------------------");
         $finish;
 
     end
