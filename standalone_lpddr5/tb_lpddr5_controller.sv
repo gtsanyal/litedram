@@ -46,9 +46,14 @@ module tb_lpddr5_controller ();
             256'h0123456789ABCDEF_0123456789ABCDEF_0123456789ABCDEF_0123456789ABCDEF
         );
 
+        repeat(10) @(posedge sys_clk);
 
-        $display("----------------------------------------------");
-        $display("lb_lpddr5_controller.sv finished");
+        tester.read(25'h0101234);
+
+        repeat (2000) @(posedge sys_clk);
+
+        $display("---------------------------------------------");
+        $display("TB finished");
         $display("----------------------------------------------");
 
         $finish;

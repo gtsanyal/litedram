@@ -8,12 +8,14 @@ from litedram.core.crossbar import LiteDRAMCrossbar
 from litedram.phy.lpddr5.simphy import LPDDR5SimPHY
 from litedram.phy.lpddr5.simsoc import LPDDR5ExampleModule
 
+
+
 class StandaloneLPDDR5Controller(Module):
     
     def __init__(self, phy_settings, geom_settings, timing_settings, clk_freq):
 
         controller_settings = ControllerSettings(
-            with_refresh        = False, #TODO: Change this
+            with_refresh        = True,
             with_auto_precharge = False,
         )
 

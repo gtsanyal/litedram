@@ -2,11 +2,15 @@
 
 class harness;
 
-    typedef enum logic[2:0] {
+    typedef enum logic [2:0] {
         NOP   = 3'b000,
+        ZQC   = 3'b001,
         ACT   = 3'b010,
+        PRE   = 3'b011,
         READ  = 3'b100,
-        WRITE = 3'b101
+        WRITE = 3'b101,
+        REF   = 3'b110,
+        MRS   = 3'b111
     } DFI_CMD;
 
     local virtual lpddr5_if vif;
@@ -34,8 +38,15 @@ class harness;
 
                     NOP: ;
 
+                    ZQC: ;
+
                     ACT: $display(
                         "[%0t] DFI ACT: bank=%0d row=0x%h",
+                        $time, vif.dfi_p0_bank, vif.dfi_p0_address
+                    );
+
+                    PRE: $display(
+                        "[%0t] DFI PRE: bank=%0d addr=0x%h",
                         $time, vif.dfi_p0_bank, vif.dfi_p0_address
                     );
 
@@ -48,6 +59,13 @@ class harness;
                         "[%0t] DFI WRITE: bank=%0d col=0x%h",
                         $time, vif.dfi_p0_bank, vif.dfi_p0_address
                     );
+
+                    REF: $display(
+                        "[%0t] DFI REFRESH",
+                        $time
+                    );
+
+                    MRS: ;
 
                     default: $display(
                         "[%0t] DFI OTHER: cmd=%03b bank=%0d addr=0x%h",
