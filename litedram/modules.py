@@ -1161,3 +1161,27 @@ class MT53E256M16D1(SDRAMModule):
         "1866": _SpeedgradeTimings(tRP=(3, 21), tRCD=(4, 18), tWR=(4, 18), tRFC=180, tFAW=40, tRAS=(3, 42)),  # TODO: tRAS_max
     }
     speedgrade_timings["default"] = speedgrade_timings["1866"]
+
+
+class W66AP6NB(SDRAMModule):
+    """Winbond W66AP6NB: 1Gb LPDDR4, single channel, x16 (one channel of the W66BP2NQ)
+
+    Geometry and timings match the Winbond behavioral model (Config-AC.v, rev 1.7):
+    8 banks, 8192 rows (row_wid=13), 1024 columns (col_wid=10), MR8 = 0x30.
+    """
+    memtype = "LPDDR4"
+
+    nbanks = 8
+    nrows  = 8192
+    ncols  = 1024
+
+    # MASK WRITE requires tCCDMW = 32 tCK; plain WRITE only tCCD = 8 tCK (BL16).
+    tccd = {"write": (8, None), "masked-write": (32, None)}
+
+    # tREFI(all-bank) = 32 ms / 8192 = 3.904 us; tRFCab = 130 ns (1Gb density).
+    # tRP uses the all-bank value (21 ns) since the refresher issues PRECHARGE ALL.
+    technology_timings = _TechnologyTimings(tREFI=32e6/8192, tWTR=(8, 10), tCCD=tccd["masked-write"], tRRD=(4, 10), tZQCS=None)
+    speedgrade_timings = {
+        "1600": _SpeedgradeTimings(tRP=(4, 21), tRCD=(4, 18), tWR=(6, 18), tRFC=(None, 130), tFAW=(None, 40), tRAS=(3, 42)),
+    }
+    speedgrade_timings["default"] = speedgrade_timings["1600"]

@@ -15,13 +15,14 @@ from litedram.core.crossbar import LiteDRAMCrossbar
 # Core ---------------------------------------------------------------------------------------------
 
 class LiteDRAMCore(Module, AutoCSR):
-    def __init__(self, phy, geom_settings, timing_settings, clk_freq, **kwargs):
+    def __init__(self, phy, geom_settings, timing_settings, clk_freq, dfii_sw_control_on_reset=False, **kwargs):
         self.submodules.dfii = DFIInjector(
             addressbits = max(geom_settings.addressbits, getattr(phy, "addressbits", 0)),
             bankbits    = max(geom_settings.bankbits, getattr(phy, "bankbits", 0)),
             nranks      = phy.settings.nranks,
             databits    = phy.settings.dfi_databits,
-            nphases     = phy.settings.nphases)
+            nphases     = phy.settings.nphases,
+            sw_control_on_reset = dfii_sw_control_on_reset)
         self.comb += self.dfii.master.connect(phy.dfi)
 
         self.submodules.controller = controller = LiteDRAMController(

@@ -55,7 +55,10 @@ class PhaseInjector(Module, AutoCSR):
 # DFIInjector --------------------------------------------------------------------------------------
 
 class DFIInjector(Module, AutoCSR):
-    def __init__(self, addressbits, bankbits, nranks, databits, nphases=1):
+    def __init__(self, addressbits, bankbits, nranks, databits, nphases=1, sw_control_on_reset=False):
+        # sw_control_on_reset: start in software control with CKE/RESET_N low, so that the DRAM
+        # is held in reset until the initialization sequence runs (instead of the controller
+        # driving RESET_N/CKE high right after system reset).
         self.slave   = dfi.Interface(addressbits, bankbits, nranks, databits, nphases)
         self.master  = dfi.Interface(addressbits, bankbits, nranks, databits, nphases)
         csr_dfi      = dfi.Interface(addressbits, bankbits, nranks, databits, nphases)
@@ -67,7 +70,7 @@ class DFIInjector(Module, AutoCSR):
             CSRField("sel",     size=1, values=[
                 ("``0b0``", "Software (CPU) control."),
                 ("``0b1``", "Hardware control (default)."),
-            ], reset=0b1), # Defaults to HW control.
+            ], reset=0b0 if sw_control_on_reset else 0b1), # Defaults to HW control.
             CSRField("cke",     size=1, description="DFI clock enable bus"),
             CSRField("odt",     size=1, description="DFI on-die termination bus"),
             CSRField("reset_n", size=1, description="DFI clock reset bus"),

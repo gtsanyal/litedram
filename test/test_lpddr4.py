@@ -192,6 +192,66 @@ class LPDDR4Tests(unittest.TestCase):
                     }},
                 )
 
+    def test_lpddr4_mpc_training_cas2(self):
+        # Training MPCs (READ-FIFO, READ-DQ-CAL, WRITE-FIFO) must be followed by a CAS-2 with all
+        # column bits zero, while other MPCs (e.g. ZQCAL START) are single 2-cycle commands.
+        latency = '00000000' * self.CMD_LATENCY
+        read_dq_cal = dict(cs_n=0, cas_n=1, ras_n=1, we_n=0, bank=0, address=0b1000011)
+        zqc_start   = dict(cs_n=0, cas_n=1, ras_n=1, we_n=0, bank=0, address=0b1001111)
+        self.run_test(LPDDR4SimPHY(sys_clk_freq=self.SYS_CLK_FREQ),
+            dfi_sequence = [
+                {0: read_dq_cal, 4: zqc_start},
+            ],
+            pad_checkers = {"sys8x_90": {
+                #                  MPC+CAS-2  -   MPC
+                'cs':  latency + '1010' + '0010',
+                'ca0': latency + '0100' + '0001',
+                'ca1': latency + '0110' + '0001',
+                'ca2': latency + '0000' + '0001',
+                'ca3': latency + '0000' + '0001',
+                'ca4': latency + '0010' + '0000',
+                'ca5': latency + '1000' + '0010',
+            }},
+        )
+
+    def test_lpddr4_boot_mode(self):
+        # Boot mode: CK at a low frequency (period = boot_clk_div sys cycles) and each CS/CA slot
+        # held for a whole boot clock period, centered on the CK rising edge.
+        from litedram.phy.utils import Latency
+        from litedram.phy.lpddr4.basephy import LPDDR4PHY
+        from litedram.phy.lpddr4.simphy import LPDDR4SimulationPads
+        mrw = dict(cs_n=0, cas_n=0, ras_n=0, we_n=0, bank=1, address=0x24)  # MR1 = 0x24
+        for div in [1, 2]:
+            with self.subTest(boot_clk_div=div):
+                phy = LPDDR4PHY(LPDDR4SimulationPads(), sys_clk_freq=50e6, phytype="LPDDR4PHY",
+                    ser_latency=Latency(sys=1), des_latency=Latency(sys=2), boot_clk_div=div)
+                ck, slots = [], []
+                def generator():
+                    for cycle in range(4 + 5*div):
+                        for p in phy.dfi.phases:
+                            yield from [p.cs_n.eq(1), p.ras_n.eq(1), p.cas_n.eq(1), p.we_n.eq(1)]
+                        if cycle == 0:
+                            for k, v in mrw.items():
+                                yield getattr(phy.dfi.phases[3], k).eq(v)
+                        yield
+                        ck.append(~(yield phy.out.clk) & 0xffff)
+                        cs = (yield phy.out.cs)
+                        ca = 0
+                        for b in range(6):
+                            v = (yield phy.out.ca[b])
+                            self.assertIn(v, [0, 0xff])  # CA held for the whole cycle
+                            ca |= (v & 1) << b
+                        self.assertIn(cs, [0, 0xff])
+                        slots.append((cs & 1, ca))
+                run_simulation(phy, generator())
+                # CK: low in the first half of the boot period, high in the second half
+                period = "".join(format(c, "016b")[::-1] for c in ck)
+                self.assertIn("0" * 8 * div + "1" * 8 * div, period)
+                self.assertNotIn("01" * 4, period)  # never the full-rate pattern
+                # MRW-1 (CS high, CA=0x06), MA=1, MRW-2 (CS high, CA=0x16), OP[5:0]=0x24; each slot `div` cycles
+                cmd = [s for s in slots if s != (0, 0)]
+                self.assertEqual(cmd, [(1, 0x06)]*div + [(0, 0x01)]*div + [(1, 0x16)]*div + [(0, 0x24)]*div)
+
     def test_lpddr4_command_overlaps(self):
         # Test command overlap protection (can happen only if controller violates timings)
         latency = '00000000' * self.CMD_LATENCY

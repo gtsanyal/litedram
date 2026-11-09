@@ -126,7 +126,14 @@ class DFIPhaseAdapter(Module):
                 _cmd["REF"]: cmds("DESELECT",   "REFRESH"),
                 # Use bank address to select command type
                 _cmd["ZQC"]: Case(dfi_phase.bank, {
-                    SpecialCmd.MPC: cmds("DESELECT", "MPC"),
+                    # Training MPCs (READ-FIFO, READ-DQ-CAL, WRITE-FIFO: OP[6:3]=1000) must be
+                    # immediately followed by a CAS-2 with all column bits zero (JESD209-4); the
+                    # other MPCs (NOP, ZQCAL START/LATCH, DQS oscillator) are single commands.
+                    SpecialCmd.MPC: If(dfi_phase.address[3:7] == 0b1000,
+                        *cmds("MPC", "CAS-2 (MPC)"),
+                    ).Else(
+                        *cmds("DESELECT", "MPC"),
+                    ),
                     SpecialCmd.MRR: cmds("MRR-1",    "CAS-2"),
                     "default": cmds("DESELECT", "DESELECT", valid=0),
                 }),
@@ -171,6 +178,7 @@ class Command(Module):
         "MASK WRITE-1": ["L L H H L BL",        "BA0 BA1 BA2 V C9 AP"],
         "READ-1":       ["L H L L L BL",        "BA0 BA1 BA2 V C9 AP"],
         "CAS-2":        ["L H L L H C8",        "C2 C3 C4 C5 C6 C7"],
+        "CAS-2 (MPC)":  ["L H L L H L",         "L L L L L L"],
         "PRECHARGE":    ["L L L L H AB",        "BA0 BA1 BA2 V V V"],
         "MPC":          ["L L L L L OP6",       "OP0 OP1 OP2 OP3 OP4 OP5"],
         "DESELECT":     ["X X X X X X",         "X X X X X X"],
@@ -206,11 +214,11 @@ class Command(Module):
             "BL":      lambda: 0,  # on-the-fly burst length, not using
             "AP":      lambda: self.dfi.address[10],  # auto precharge
             "AB":      lambda: self.dfi.address[10],  # all banks
-            "BA(\d+)": lambda i: self.dfi.bank[i],
-            "R(\d+)":  lambda i: self.dfi.address[i],  # row
-            "C(\d+)":  lambda i: self.dfi.address[i],  # column
-            "MA(\d+)": lambda i: mr_address[i],  # mode register address
-            "OP(\d+)": lambda i: self.dfi.address[i],  # mode register value, or operand for MPC
+            r"BA(\d+)": lambda i: self.dfi.bank[i],
+            r"R(\d+)":  lambda i: self.dfi.address[i],  # row
+            r"C(\d+)":  lambda i: self.dfi.address[i],  # column
+            r"MA(\d+)": lambda i: mr_address[i],  # mode register address
+            r"OP(\d+)": lambda i: self.dfi.address[i],  # mode register value, or operand for MPC
         }
         for pattern, value in rules.items():
             m = re.match(pattern, bit)
