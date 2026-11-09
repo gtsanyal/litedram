@@ -1,0 +1,3 @@
+- [K7 LPDDR4 flow status](k7-lpddr4-flow-status.md) — K7 + Winbond VCS sim; blocked on SecureIP copy; see standalone_lpddr4_k7/STATUS.md
+- [Hardware-realizable only](hardware-realizable.md) — every sim technique must work on the real Kintex-7 board; Winbond is the target
+- [CAEN access](caen-access.md) — VCS via ssh BatchMode over user's ControlMaster socket; Okta login is manual

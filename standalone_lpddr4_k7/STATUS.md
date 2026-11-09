@@ -10,6 +10,9 @@ required by the OSERDESE2/ISERDESE2 unisims; not in `../../src`). Copy from the 
 
     scp -r <vivado-host>:$XILINX_VIVADO/data/secureip/{oserdese2,iserdese2} ~/Desktop/sylvester/secureip/
 
+(Vivado's `data/secureip/secureip_cell.list.f` confirms these two are the only SecureIP for
+ISERDESE2/OSERDESE2 on kintex7; each dir has a `<ip>_cell.list.f` giving the file list/order —
+consider compiling from it instead of the Makefile's `*.vp` glob.)
 Then check the `.vp` files contain a Synopsys key block, and run `make lpddr4-k7-caen`
 (`XILINX_SRC ?= ../src`, `XILINX_SECUREIP ?= ../secureip`).
 
