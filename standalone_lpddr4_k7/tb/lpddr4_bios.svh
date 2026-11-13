@@ -19,6 +19,14 @@
 
 import lpddr4_pkg::*;
 
+// Mode register commands decoded from the CA bus at the DRAM pins by the testbench monitor
+// (tb_lpddr4_k7.sv), so the BIOS can check that each MRW/MRR arrived with the intended MA/OP.
+package lpddr4_ca_mon;
+    typedef struct { int ma; logic [7:0] op; } mrw_t;
+    mrw_t mrw_q [$];
+    int   mrr_q [$];
+endpackage
+
 class lpddr4_bios;
 
     localparam logic [6:0] MPC_READ_DQ_CAL = 7'b1000011;
@@ -38,6 +46,7 @@ class lpddr4_bios;
     int rd_bitslip [NBYTES];
     int rd_dq_tap  [NBYTES];
     int wr_dqs_tap [NBYTES];
+    int ck_tap;
     int wr_bitslip [NBYTES];
     int wr_dq_tap  [NBYTES];
 
@@ -96,8 +105,24 @@ class lpddr4_bios;
         end
     endtask
 
+    // tMRW / tMRD / tMRWCKEL = max(14 ns, 10 tCK) and tVRCG_ENABLE = 200 ns; in boot mode
+    // tCK = 20 ns, so 10 tCK = 200 ns. 300 ns also covers the CSR -> pad pipeline latency.
+    // (BIOS C code: cdelay of the same length after every MRW.)
     task automatic mrw(input int ma, input logic [7:0] op);
+        lpddr4_ca_mon::mrw_q.delete();
         dfii_command(0, DFII_COMMAND_RAS | DFII_COMMAND_CAS | DFII_COMMAND_WE | DFII_COMMAND_CS, op, ma[5:0]);
+        #(300ns);
+        check_pins_mrw(ma, op);
+    endtask
+
+    // The MRW must have reached the DRAM pins exactly once, with this MA and OP.
+    task automatic check_pins_mrw(input int ma, input logic [7:0] op);
+        if (lpddr4_ca_mon::mrw_q.size() != 1 || lpddr4_ca_mon::mrw_q[0].ma != ma || lpddr4_ca_mon::mrw_q[0].op !== op) begin
+            $display("[%t] BIOS: ERROR: MRW MR%0d=%h not seen at the DRAM pins (monitor saw %0d MRW: %p)",
+                     $realtime, ma, op, lpddr4_ca_mon::mrw_q.size(), lpddr4_ca_mon::mrw_q);
+            errors++;
+        end
+        lpddr4_ca_mon::mrw_q.delete();
     endtask
 
     task automatic mpc(input logic [6:0] op, input bit rddata = 1'b0);
@@ -107,6 +132,22 @@ class lpddr4_bios;
 
     task automatic mrr_cmd(input int ma);
         dfii_command(RDPHASE, DFII_COMMAND_WE | DFII_COMMAND_CS | DFII_COMMAND_RDDATA, ma, SPECIAL_MRR);
+    endtask
+
+    // MRR and return OP (DQ[7:0], first beat); also checks the MRR reached the pins with this MA.
+    task automatic mrr(input int ma, output logic [7:0] op);
+        logic [DFI_DATABITS*NPHASES-1:0] d;
+        lpddr4_ca_mon::mrr_q.delete();
+        mrr_cmd(ma);
+        wait_cycles(READ_LATENCY + 8);
+        dfii_get_rddata(d);
+        op = lane(d, 0, 0);
+        if (lpddr4_ca_mon::mrr_q.size() != 1 || lpddr4_ca_mon::mrr_q[0] != ma) begin
+            $display("[%t] BIOS: ERROR: MRR MR%0d not seen at the DRAM pins (monitor saw %p)",
+                     $realtime, ma, lpddr4_ca_mon::mrr_q);
+            errors++;
+        end
+        lpddr4_ca_mon::mrr_q.delete();
     endtask
 
     task automatic activate(input int bank, input int row);
@@ -269,17 +310,34 @@ class lpddr4_bios;
 
     // ------------------------------------------------------------------ Write leveling
     // DRAM in write leveling mode samples CK with each DQS rising edge and returns the level on DQ.
-    task automatic train_write_leveling();
-        bit level [NBYTES][];
+    //
+    // DQS ODELAY can only go from its reset value (HALF_SYS8X_TAPS) to DELAYS-1, i.e. 3/4 of a
+    // tCK (32 taps): a CK 0->1 edge in the remaining quarter is not seen. If any byte has no edge,
+    // delay CK/CA (one shared ODELAY) by CK_SHIFTS taps and sweep again: every edge moves later by
+    // the same amount (all bytes must fit in one 23-tap window: byte-to-byte DQS skew up to
+    // ~1.5 ns). Read leveling depends on the CK delay, so it runs after this.
+    localparam int CK_SHIFTS [7] = '{0, 4, 8, 12, 16, 20, 24};
+
+    // CK, CA, CS, CKE and ODT share one ODELAY; change it in power-down (CKE low), as for the
+    // frequency change in init(): tCKELCK / tCKCKEH / tXP all well below 100 ns at 400 MHz.
+    task automatic set_ck_delay(input int taps);
+        dfii_control(DFII_CONTROL_RESET_N | DFII_CONTROL_ODT);
+        #(100ns);
+        pulse(CSR_DDRPHY_CDLY_RST_ADDR);
+        pulse(CSR_DDRPHY_CDLY_INC_ADDR, taps);
+        #(100ns);
+        dfii_control(DFII_CONTROL_RESET_N | DFII_CONTROL_ODT | DFII_CONTROL_CKE);
+        #(100ns);
+    endtask
+
+    task automatic write_leveling_sweep(output bit level [NBYTES][]);
         logic [DFI_DATABITS*NPHASES-1:0] d;
-        localparam int MAX_TAPS = DELAYS;
-        $display("[%t] BIOS: write leveling (DQS ODELAY %0d..%0d taps)", $realtime, HALF_SYS8X_TAPS, MAX_TAPS-1);
-        foreach (level[b]) level[b] = new[MAX_TAPS];
+        foreach (level[b]) level[b] = new[DELAYS];
         mrw(2, MR2_VALUE | 8'h80);                               // MR2 OP7: write leveling
         wait_cycles(16);
         csr_write(CSR_DDRPHY_WLEVEL_EN_ADDR, 1);
         wait_cycles(16);
-        for (int t = HALF_SYS8X_TAPS; t < MAX_TAPS; t++) begin
+        for (int t = HALF_SYS8X_TAPS; t < DELAYS; t++) begin
             for (int b = 0; b < NBYTES; b++) set_wdly_dqs(b, t);
             pulse(CSR_DDRPHY_WLEVEL_STROBE_ADDR);
             wait_cycles(16);                                     // tWLO
@@ -294,19 +352,43 @@ class lpddr4_bios;
         csr_write(CSR_DDRPHY_WLEVEL_EN_ADDR, 0);
         mrw(2, MR2_VALUE);
         wait_cycles(16);
-        for (int b = 0; b < NBYTES; b++) begin
-            string s = "";
-            wr_dqs_tap[b] = -1;
-            for (int t = 0; t < MAX_TAPS; t++) begin
-                s = {s, (t < HALF_SYS8X_TAPS) ? " " : (level[b][t] ? "1" : "0")};
-                if (t > HALF_SYS8X_TAPS && wr_dqs_tap[b] < 0 && level[b][t] && !level[b][t-1]) wr_dqs_tap[b] = t;
+    endtask
+
+    task automatic train_write_leveling();
+        bit level [NBYTES][];
+        int tap [NBYTES];
+        bit ok;
+        foreach (CK_SHIFTS[k]) begin
+            if (k > 0 && $test$plusargs("WL_NO_RETRY")) break;   // debug: old behaviour
+            ck_tap = CK_SHIFTS[k];
+            if (k > 0) begin
+                $display("[%t] BIOS: write leveling: retrying with CK/CA ODELAY %0d taps", $realtime, ck_tap);
+                set_ck_delay(ck_tap);
             end
-            if (wr_dqs_tap[b] < 0) begin
-                $display("[%t] BIOS: WARNING: no CK 0->1 transition for byte%0d |%s|, keeping DQS at %0d taps",
-                         $realtime, b, s, HALF_SYS8X_TAPS);
-                wr_dqs_tap[b] = HALF_SYS8X_TAPS;
-            end else
-                $display("[%t] BIOS: write leveling byte%0d |%s| -> DQS ODELAY %0d taps", $realtime, b, s, wr_dqs_tap[b]);
+            $display("[%t] BIOS: write leveling (DQS ODELAY %0d..%0d taps, CK ODELAY %0d)",
+                     $realtime, HALF_SYS8X_TAPS, DELAYS-1, ck_tap);
+            write_leveling_sweep(level);
+            ok = 1;
+            for (int b = 0; b < NBYTES; b++) begin
+                string s = "";
+                tap[b] = -1;
+                for (int t = 0; t < DELAYS; t++) begin
+                    s = {s, (t < HALF_SYS8X_TAPS) ? " " : (level[b][t] ? "1" : "0")};
+                    if (t > HALF_SYS8X_TAPS && tap[b] < 0 && level[b][t] && !level[b][t-1]) tap[b] = t;
+                end
+                $display("[%t] BIOS: write leveling byte%0d |%s| -> %s", $realtime, b, s,
+                         tap[b] < 0 ? "no CK 0->1 edge" : $sformatf("DQS ODELAY %0d taps", tap[b]));
+                if (tap[b] < 0) ok = 0;
+            end
+            if (ok) break;
+        end
+        if (!ok) begin
+            $display("[%t] BIOS: ERROR: write leveling failed at every CK delay", $realtime);
+            errors++;
+            foreach (tap[b]) if (tap[b] < 0) tap[b] = HALF_SYS8X_TAPS;
+        end
+        for (int b = 0; b < NBYTES; b++) begin
+            wr_dqs_tap[b] = tap[b];
             set_wdly_dqs(b, wr_dqs_tap[b]);
         end
     endtask
@@ -381,22 +463,120 @@ class lpddr4_bios;
 
     // ------------------------------------------------------------------ Checks / sequence
     task automatic check_mode_registers();
-        logic [DFI_DATABITS*NPHASES-1:0] d;
+        logic [7:0] v;
         struct { int ma; logic [7:0] exp; string what; } checks [] = '{
-            '{5, 8'h08,     "MR5  manufacturer ID (Winbond)"},
-            '{8, 8'h30,     "MR8  type/density/width (S16, 1Gb, x16)"},
-            '{1, MR1_VALUE, "MR1  (FSP1)"},
-            '{2, MR2_VALUE, "MR2  (FSP1, RL/WL)"}
+            '{5,  8'h08,      "MR5  manufacturer ID (Winbond)"},
+            '{8,  8'h30,      "MR8  type/density/width (S16, 1Gb, x16)"},
+            '{1,  MR1_VALUE,  "MR1  (FSP1)"},
+            '{2,  MR2_VALUE,  "MR2  (FSP1, RL/WL)"},
+            '{3,  MR3_VALUE,  "MR3  (FSP1, PDDS/PU-CAL/DBI)"},
+            '{11, MR11_VALUE, "MR11 (FSP1, ODT)"},
+            '{12, MR12_VALUE, "MR12 (FSP1, VREF CA)"},
+            '{14, MR14_VALUE, "MR14 (FSP1, VREF DQ)"}
         };
         foreach (checks[i]) begin
-            mrr_cmd(checks[i].ma);
-            wait_cycles(READ_LATENCY + 8);
-            dfii_get_rddata(d);
-            if (lane(d, 0, 0) !== checks[i].exp) begin
-                $display("[%t] BIOS: ERROR: MRR %s = %h (expected %h)", $realtime, checks[i].what, lane(d, 0, 0), checks[i].exp);
+            mrr(checks[i].ma, v);
+            if (v !== checks[i].exp) begin
+                $display("[%t] BIOS: ERROR: MRR %s = %h (expected %h)", $realtime, checks[i].what, v, checks[i].exp);
                 errors++;
             end else
-                $display("[%t] BIOS: MRR %s = %h OK", $realtime, checks[i].what, lane(d, 0, 0));
+                $display("[%t] BIOS: MRR %s = %h OK", $realtime, checks[i].what, v);
+        end
+    endtask
+
+    // ------------------------------------------------------------------ Unused-slot probe
+    // MRW/MRR to mode registers / values LPDDR4 does not define. Runs by default in simulation
+    // (+NO_MR_PROBE to skip); NOT part of a real-board BIOS. Checks:
+    //  * every MRW/MRR reaches the DRAM pins with the intended MA/OP (pin monitor, in mrw/mrr);
+    //  * each unused MA either stores both patterns (pat, ~pat), stores some bits with the rest
+    //    constant (e.g. Winbond MR31 keeps OP[1:0] - undocumented, never write it on the board),
+    //    ignores writes (reads its old value), or reads X (no storage in this model) - anything
+    //    else is an error;
+    //  * no aliasing: no MA reads back a pattern written to a different MA (all MAs are written
+    //    first, then all read back);
+    //  * the defined registers are unchanged afterwards (read-only MRs + check_mode_registers).
+    // Skips MRs with side effects: MR9 vendor test, MR10 ZQ reset, MR24/25 TRR/PPR (PPR is a
+    // permanent fuse repair on silicon), MR39 (reserved for DRAM test), MR51 (LPDDR4X
+    // single-ended modes).
+    localparam int PROBE_MAS [] = '{26, 27, 28, 29, 30, 31, 33, 34, 35, 36, 37, 38, 41, 42, 43, 44, 45, 46, 47,
+                                    48, 49, 50, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63};
+    localparam int PROBE_RO_MAS [] = '{0, 5, 6, 7, 8};             // read-only MRs, must not change
+
+    static function automatic logic [7:0] probe_pat(input int ma);
+        return 8'hA5 ^ 8'(ma);                                   // unique per MA, never 00/FF
+    endfunction
+
+    task automatic mr_probe();
+        int n = PROBE_MAS.size();
+        logic [7:0] pre [], rb1 [], rb2 [], ro_pre [], v_post;
+        int n_stored = 0, n_partial = 0, n_ignored = 0, n_x = 0, n_bad = 0;
+        pre = new[n]; rb1 = new[n]; rb2 = new[n]; ro_pre = new[PROBE_RO_MAS.size()];
+        $display("[%t] BIOS: MR probe: %0d unused mode register addresses", $realtime, n);
+        foreach (PROBE_RO_MAS[i]) mrr(PROBE_RO_MAS[i], ro_pre[i]);
+        foreach (PROBE_MAS[i]) mrr(PROBE_MAS[i], pre[i]);
+        foreach (PROBE_MAS[i]) mrw(PROBE_MAS[i], probe_pat(PROBE_MAS[i]));
+        foreach (PROBE_MAS[i]) mrr(PROBE_MAS[i], rb1[i]);
+        foreach (PROBE_MAS[i]) mrw(PROBE_MAS[i], ~probe_pat(PROBE_MAS[i]));
+        foreach (PROBE_MAS[i]) mrr(PROBE_MAS[i], rb2[i]);
+        foreach (PROBE_MAS[i]) begin
+            int ma = PROBE_MAS[i];
+            logic [7:0] pat = probe_pat(ma);
+            string res;
+            // per bit: "stored" follows both writes, "constant" reads the same value both times
+            logic [7:0] stored_bits = ~(rb1[i] ^ pat) & ~(rb2[i] ^ ~pat);
+            logic [7:0] const_bits  = ~(rb1[i] ^ rb2[i]);
+            if (rb1[i] === pat && rb2[i] === ~pat) begin
+                res = "STORED"; n_stored++;
+            end else if ($isunknown(rb1[i]) || $isunknown(rb2[i])) begin
+                res = "reads X (no storage in this model)"; n_x++;
+            end else if (rb1[i] === pre[i] && rb2[i] === pre[i]) begin
+                res = "ignored (MRW has no effect)"; n_ignored++;
+            end else if ((stored_bits | const_bits) === 8'hFF) begin
+                res = $sformatf("PARTIAL: bits %b stored, other bits read constant", stored_bits);
+                n_partial++;
+            end else begin
+                res = "ERROR: inconsistent";
+                foreach (PROBE_MAS[j])
+                    if (j != i && (rb1[i] === probe_pat(PROBE_MAS[j]) || rb2[i] === ~probe_pat(PROBE_MAS[j])))
+                        res = $sformatf("ERROR: aliases MR%0d", PROBE_MAS[j]);
+                n_bad++;
+            end
+            $display("[%t] BIOS:   MR%0d: before %h  wrote %h, %h  read back %h, %h  %s", $realtime, ma,
+                     pre[i], pat, ~pat, rb1[i], rb2[i], res);
+        end
+        foreach (PROBE_MAS[i]) mrw(PROBE_MAS[i], $isunknown(pre[i]) ? 8'h00 : pre[i]);  // leave as found
+        foreach (PROBE_RO_MAS[i]) begin
+            mrr(PROBE_RO_MAS[i], v_post);
+            if (v_post !== ro_pre[i]) begin
+                $display("[%t] BIOS: ERROR: MR%0d changed by the probe: %h -> %h", $realtime, PROBE_RO_MAS[i],
+                         ro_pre[i], v_post);
+                n_bad++;
+            end
+        end
+        errors += n_bad;
+        $display("[%t] BIOS: MR probe: %0d stored, %0d partial, %0d ignored, %0d read X, %0d errors (aliasing/inconsistent/RO changed)",
+                 $realtime, n_stored, n_partial, n_ignored, n_x, n_bad);
+        $display("[%t] BIOS: MR probe: defined registers after the probe:", $realtime);
+        check_mode_registers();
+        $display("[%t] BIOS: MR probe: reserved values in defined registers", $realtime);
+        begin
+            struct { int ma; logic [7:0] val, restore; string what; } rv [] = '{
+                '{3,  (MR3_VALUE  & 8'hC7) | 8'h38, MR3_VALUE,  "MR3 PDDS=7 (reserved)"},
+                '{3,  (MR3_VALUE  & 8'hC7),         MR3_VALUE,  "MR3 PDDS=0 (reserved)"},
+                '{11, (MR11_VALUE & 8'hF8) | 8'h07, MR11_VALUE, "MR11 DQ ODT=7 (reserved)"}
+            };
+            foreach (rv[i]) begin
+                mrw(rv[i].ma, rv[i].val);
+                mrr(rv[i].ma, v_post);
+                $display("[%t] BIOS:   %s: wrote %h read back %h  %s", $realtime, rv[i].what, rv[i].val, v_post,
+                         v_post === rv[i].val ? "STORED" : "not stored");
+                mrw(rv[i].ma, rv[i].restore);
+                mrr(rv[i].ma, v_post);
+                if (v_post !== rv[i].restore) begin
+                    $display("[%t] BIOS: ERROR: MR%0d not restored (%h)", $realtime, rv[i].ma, v_post);
+                    errors++;
+                end
+            end
         end
     endtask
 
@@ -406,9 +586,10 @@ class lpddr4_bios;
         mrw(40, DQ_CAL_B);
         mrw(15, 8'h00);
         mrw(20, 8'h00);
+        train_write_leveling();                                  // may move CK: before read leveling
         train_read();
         check_mode_registers();
-        train_write_leveling();
+        if (!$test$plusargs("NO_MR_PROBE")) mr_probe();          // simulation only, see mr_probe()
         train_write_dq();
     endtask
 

@@ -113,6 +113,7 @@ lpddr4-clean:
 #   make lpddr4-k7-generate     generate RTL/CSR map/params (Python venv)
 #   make lpddr4-k7-caen         generate, stage Xilinx models, sync to CAEN, run VCS
 #   make lpddr4-k7-vcs-run      compile + run (on the VCS host, after sync)
+#   make lpddr4-k7-seeds        parallel seed sweep (SEEDS="1 2 3" PAR=8 NRANDOM=1000)
 #
 # Xilinx simulation models come from a Vivado installation:
 #   XILINX_SRC      = $XILINX_VIVADO/data/verilog/src   (unisims, unisims_dr, glbl.v)
@@ -137,7 +138,7 @@ L4K7_VCS_FLAGS := -full64 -sverilog -timescale=1ps/1fs +define+T1600 \
 	+incdir+$(L4K7_BUILD) +incdir+$(L4K7_DIR)/tb +incdir+$(L4_MODEL) +incdir+$(L4K7_XIL)/unisims_dr \
 	-debug_access+r -top tb_lpddr4_k7 -top glbl $(L4_DEFINES)
 
-.PHONY: lpddr4-k7-generate lpddr4-k7-stage lpddr4-k7-sync lpddr4-k7-caen lpddr4-k7-vcs-run lpddr4-k7-clean
+.PHONY: lpddr4-k7-generate lpddr4-k7-stage lpddr4-k7-sync lpddr4-k7-caen lpddr4-k7-vcs-run lpddr4-k7-clean lpddr4-k7-seeds
 
 lpddr4-k7-generate:
 	$(PYTHON) $(L4K7_DIR)/generate.py --output-dir $(L4K7_BUILD)
@@ -178,6 +179,24 @@ lpddr4-k7-vcs-run:
 	@echo "---- testbench summary ----"
 	@grep -E "TB:|BIOS:|TRAFFIC:|TRAINING:|SCOREBOARD|TEST (PASSED|FAILED)|Fatal|Error-" $(L4K7_SIMDIR)/run.log | head -80
 	@grep -q "TEST PASSED" $(L4K7_SIMDIR)/run.log
+
+# Seed sweep with the already compiled simv (run lpddr4-k7-vcs-run first). Each seed randomizes
+# the traffic, the PCB delays/skews and the board reset release. Runs PAR seeds at a time.
+# Per seed: PASS/FAIL, trained values, and model ERROR lines other than the known benign ones
+# (OSERDES X at t=0 / PLL lock "Initialization", write-leveling sweep tWLS/tWLH).
+SEEDS ?= 1 2 3 4 5 6 7 8
+PAR   ?= 8
+L4K7_BENIGN := Initialization|Write-leveling, tWLH|tWLS violation|clock period changed
+lpddr4-k7-seeds:
+	mkdir -p $(L4K7_SIMDIR)/seeds
+	cd $(L4K7_SIMDIR) && printf '%s\n' $(SEEDS) | xargs -P $(PAR) -I{} \
+		sh -c './simv +SEED={} +NRANDOM=$(NRANDOM) -l seeds/run_{}.log > /dev/null 2>&1' ; true
+	@cd $(L4K7_SIMDIR)/seeds && fail=0; for s in $(SEEDS); do \
+		if grep -q "TEST PASSED" run_$$s.log; then r=PASS; else r=FAIL; fail=1; fi; \
+		u=$$(grep -E "ERROR" run_$$s.log | grep -vE "$(L4K7_BENIGN)" | wc -l); \
+		[ $$u -ne 0 ] && fail=1; \
+		echo "seed $$s: $$r  unexpected-model-errors=$$u  $$(grep -oE 'TRAINING: .*' run_$$s.log | sed 's/TRAINING: //; s/  (taps.*//')"; \
+	done; exit $$fail
 
 lpddr4-k7-caen: lpddr4-k7-sync
 	$(SSH) $(CAEN_HOST) 'bash -lc "module load vcs >/dev/null 2>&1; cd $(CAEN_DIR) && make lpddr4-k7-vcs-run SEED=$(SEED) NRANDOM=$(NRANDOM) L4_DEFINES=\"$(L4_DEFINES)\" $(if $(DUMP),DUMP=1)"'

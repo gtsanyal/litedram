@@ -87,7 +87,18 @@ class LPDDR4K7Pads:
 # Top ---------------------------------------------------------------------------------------------
 
 class CRG(Module):
-    """Same as the _CRG of litex_boards/targets/antmicro_lpddr4_test_board.py"""
+    """The _CRG of litex_boards/targets/antmicro_lpddr4_test_board.py, plus a phase-aligned
+    sys2x reset (port this change to the board CRG too).
+
+    DoubleRateLPDDR4PHY's sys<->sys2x Serializer/Deserializer use a free-running sys2x counter
+    that must be 0 on sys-aligned sys2x edges. With an independent AsyncResetSynchronizer per
+    domain, sys2x leaves reset on an arbitrary sys2x edge, so on half of the power-ups the two
+    halves of every sys word are swapped in time (CA commands crossing phase 3/4 split apart,
+    read data spread over two sys cycles). Instead, sys2x reset is sys_rst re-registered in
+    sys2x: sys_rst falls just after a sys edge E, the sys2x flop sees it at E+1 sys2x period, so
+    the first sys2x edge out of reset is E+2 (sys-aligned). sys and sys2x come from the same PLL,
+    so this is an ordinary timed synchronous path (one sys2x period).
+    """
     def __init__(self, clk100, rst):
         self.clock_domains.cd_sys    = ClockDomain()
         self.clock_domains.cd_sys2x  = ClockDomain()
@@ -98,9 +109,13 @@ class CRG(Module):
         self.comb += pll.reset.eq(rst)
         pll.register_clkin(clk100, CLK100_FREQ)
         pll.create_clkout(self.cd_sys,    SYS_CLK_FREQ)
-        pll.create_clkout(self.cd_sys2x,  2 * SYS_CLK_FREQ)
+        pll.create_clkout(self.cd_sys2x,  2 * SYS_CLK_FREQ, with_reset=False)
         pll.create_clkout(self.cd_sys8x,  8 * SYS_CLK_FREQ)
         pll.create_clkout(self.cd_idelay, IODELAY_CLK_FREQ)
+
+        sys2x_rst = Signal(reset=1, reset_less=True)
+        self.sync.sys2x += sys2x_rst.eq(self.cd_sys.rst)
+        self.comb += self.cd_sys2x.rst.eq(sys2x_rst)
 
         self.submodules.idelayctrl = S7IDELAYCTRL(self.cd_idelay)
 
@@ -247,7 +262,7 @@ def main():
     (out / "lpddr4_k7_top.v").write_text(rtl)
 
     # Xilinx primitives used by the netlist (their unisim models are needed for simulation).
-    prims = sorted(set(re.findall(r"^([A-Z][A-Z0-9_]+)\s*(?:#\s*\(|\w+\s*\()", rtl, flags=re.M)))
+    prims = sorted(set(re.findall(r"^(?:\(\*.*?\*\)\s*)?([A-Z][A-Z0-9_]+)\s*(?:#\s*\(|\w+\s*\()", rtl, flags=re.M)))
     (out / "xilinx_primitives.txt").write_text("\n".join(prims) + "\n")
     (out / "lpddr4_csr.svh").write_text(csr_svh(top))
     (out / "lpddr4_params.svh").write_text(params_svh(top, args.module))
